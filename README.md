@@ -75,7 +75,6 @@ Before deploying this stack, ensure:
 
 ```bash
 ./deploy.sh
-# That's it! Script handles everything (5-8 minutes)
 ```
 
 Or use Make:

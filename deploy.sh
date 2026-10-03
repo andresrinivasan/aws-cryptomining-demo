@@ -157,21 +157,74 @@ aws $PROFILE_ARG cloudformation create-stack \
 echo -e "${GREEN}✓ Stack creation initiated${NC}"
 echo
 
-# Wait for stack creation
+# Wait for stack creation with progress tracking
 echo -e "${BLUE}Waiting for stack creation to complete (5-8 minutes)...${NC}"
 echo -e "${YELLOW}Tip: Press Ctrl+C to stop waiting (stack will continue deploying)${NC}"
 echo
 
-if aws $PROFILE_ARG cloudformation wait stack-create-complete \
-    --region "$AWS_REGION" \
-    --stack-name "$STACK_NAME" 2>/dev/null; then
-    echo -e "${GREEN}✓ Stack created successfully!${NC}"
-else
-    echo -e "${RED}✗ Stack creation failed or was interrupted${NC}"
-    echo -e "${YELLOW}Check status with:${NC}"
-    echo -e "  aws $PROFILE_ARG cloudformation describe-stack-events --region $AWS_REGION --stack-name $STACK_NAME"
-    exit 1
-fi
+# Track completed resources to avoid duplicates
+SEEN_RESOURCES=""
+SPINNER_CHARS="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_INDEX=0
+
+while true; do
+    # Get current stack status
+    STACK_STATUS=$(aws $PROFILE_ARG cloudformation describe-stacks \
+        --region "$AWS_REGION" \
+        --stack-name "$STACK_NAME" \
+        --query 'Stacks[0].StackStatus' \
+        --output text 2>/dev/null)
+
+    # Check if stack creation completed
+    if [[ "$STACK_STATUS" == "CREATE_COMPLETE" ]]; then
+        echo -e "\n${GREEN}✓ Stack created successfully!${NC}"
+        break
+    elif [[ "$STACK_STATUS" == "CREATE_FAILED" ]] || [[ "$STACK_STATUS" == ROLLBACK_* ]]; then
+        echo -e "\n${RED}✗ Stack creation failed${NC}"
+        echo -e "${YELLOW}Recent events:${NC}"
+        aws $PROFILE_ARG cloudformation describe-stack-events \
+            --region "$AWS_REGION" \
+            --stack-name "$STACK_NAME" \
+            --query 'StackEvents[0:5].[Timestamp,ResourceStatus,ResourceType,ResourceStatusReason]' \
+            --output table 2>/dev/null
+        exit 1
+    fi
+
+    # Get recent events
+    EVENTS=$(aws $PROFILE_ARG cloudformation describe-stack-events \
+        --region "$AWS_REGION" \
+        --stack-name "$STACK_NAME" \
+        --query 'StackEvents[?ResourceStatus==`CREATE_COMPLETE`].[LogicalResourceId,ResourceType]' \
+        --output text 2>/dev/null)
+
+    # Show newly completed resources
+    while IFS=$'\t' read -r LOGICAL_ID RESOURCE_TYPE; do
+        if [[ -n "$LOGICAL_ID" ]] && [[ ! "$SEEN_RESOURCES" =~ $LOGICAL_ID ]]; then
+            # Extract short type name (e.g., AWS::Lambda::Function -> Lambda Function)
+            SHORT_TYPE=$(echo "$RESOURCE_TYPE" | sed "s/AWS:://" | sed "s/::/ /g")
+            echo -e "${GREEN}✓${NC} $SHORT_TYPE: ${BLUE}$LOGICAL_ID${NC}"
+            SEEN_RESOURCES="$SEEN_RESOURCES $LOGICAL_ID"
+        fi
+    done <<< "$EVENTS"
+
+    # Show spinner for current operation
+    CURRENT_RESOURCE=$(aws $PROFILE_ARG cloudformation describe-stack-events \
+        --region "$AWS_REGION" \
+        --stack-name "$STACK_NAME" \
+        --query 'StackEvents[?ResourceStatus==`CREATE_IN_PROGRESS`] | [0].[LogicalResourceId]' \
+        --output text 2>/dev/null)
+
+    if [[ -n "$CURRENT_RESOURCE" ]] && [[ "$CURRENT_RESOURCE" != "None" ]]; then
+        SPINNER_CHAR="${SPINNER_CHARS:$SPINNER_INDEX:1}"
+        SPINNER_INDEX=$(( (SPINNER_INDEX + 1) % ${#SPINNER_CHARS} ))
+        printf "\r${SPINNER_CHAR} Creating: ${BLUE}%s${NC}   " "$CURRENT_RESOURCE"
+    fi
+
+    sleep 3
+done
+
+# Clear spinner line
+printf "\r%*s\r" 80 ""
 
 echo
 
