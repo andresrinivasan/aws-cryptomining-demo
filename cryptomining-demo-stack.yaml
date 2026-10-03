@@ -47,7 +47,6 @@ Resources:
   IdentityDetectorLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub 'cryptomining-demo-identity-detector-${AWS::StackName}'
       Runtime: python3.13
       Handler: index.handler
       Role: !GetAtt IdentityDetectorLambdaRole.Arn
