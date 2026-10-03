@@ -560,7 +560,6 @@ Resources:
   SeederRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-seeder'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
