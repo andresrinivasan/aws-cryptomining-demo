@@ -1,0 +1,1064 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Cryptomining Demo - Security Hub + GuardDuty simulation with automatic user identity detection'
+
+Parameters:
+  BeaconEnabled:
+    Type: String
+    Default: DISABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Description: 'Enable or disable the beacon Lambda schedule (creates sample findings every 3 minutes)'
+
+  CleanupSecurityHub:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: 'Whether to disable Security Hub when stack is deleted'
+
+Resources:
+  # ============================================================================
+  # 0. IDENTITY DETECTION (Custom Resource)
+  # ============================================================================
+
+  IdentityDetectorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: STSGetCallerIdentity
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+
+  IdentityDetectorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'cryptomining-demo-identity-detector-${AWS::StackName}'
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt IdentityDetectorLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import re
+          import cfnresponse
+
+          def extract_identity(arn):
+              """Extract user identifier from IAM/STS ARN."""
+              # IAM user: arn:aws:iam::123456789012:user/asrinivasan@tines.io
+              if ':user/' in arn:
+                  return arn.split(':user/')[-1]
+
+              # Assumed role: arn:aws:sts::123456789012:assumed-role/RoleName/SessionName
+              if ':assumed-role/' in arn:
+                  parts = arn.split(':assumed-role/')[-1].split('/')
+                  if len(parts) >= 2:
+                      return parts[1]  # Session name (often email for SSO)
+                  return parts[0]  # Role name if no session
+
+              # Fallback: extract last segment
+              return arn.split('/')[-1]
+
+          def sanitize_identifier(identifier):
+              """Convert identifier to user-domain format for AWS resource names."""
+              # Remove @ and replace . with -
+              sanitized = identifier.replace('@', '-').replace('.', '-')
+              # Remove any other invalid characters for IAM names
+              sanitized = re.sub(r'[^a-zA-Z0-9-]', '-', sanitized)
+              # Convert to lowercase and trim hyphens
+              sanitized = sanitized.lower().strip('-')
+              # Collapse multiple hyphens
+              sanitized = re.sub(r'-+', '-', sanitized)
+              return sanitized
+
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+
+              response_data = {}
+              reason = None
+              status = cfnresponse.SUCCESS
+
+              try:
+                  request_type = event['RequestType']
+
+                  if request_type == 'Delete':
+                      print("Delete request - nothing to clean up")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  if request_type in ['Create', 'Update']:
+                      sts = boto3.client('sts')
+                      identity = sts.get_caller_identity()
+                      arn = identity['Arn']
+
+                      print(f"Caller ARN: {arn}")
+
+                      raw_identifier = extract_identity(arn)
+                      sanitized = sanitize_identifier(raw_identifier)
+
+                      print(f"Raw identifier: {raw_identifier}")
+                      print(f"Sanitized identifier: {sanitized}")
+
+                      response_data = {
+                          'RawIdentity': raw_identifier,
+                          'UserIdentifier': sanitized,
+                          'CallerArn': arn,
+                          'AccountId': identity['Account']
+                      }
+
+                      reason = f"Successfully detected identity: {raw_identifier}"
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  status = cfnresponse.FAILED
+                  reason = str(e)
+
+              cfnresponse.send(event, context, status, response_data, reason=reason)
+
+  IdentityDetector:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt IdentityDetectorLambda.Arn
+
+  # ============================================================================
+  # 1. SECURITY HUB ENABLEMENT (Custom Resource)
+  # ============================================================================
+
+  SecurityHubEnablerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecurityHubManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - securityhub:DescribeHub
+                  - securityhub:EnableSecurityHub
+                  - securityhub:DisableSecurityHub
+                  - securityhub:ListEnabledProductsForImport
+                Resource: '*'
+
+  SecurityHubEnablerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-securityhub-enabler'
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt SecurityHubEnablerLambdaRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          from botocore.exceptions import ClientError
+
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+
+              securityhub = boto3.client('securityhub')
+              response_data = {}
+              status = cfnresponse.SUCCESS
+              reason = None
+
+              try:
+                  request_type = event['RequestType']
+                  cleanup_enabled = event['ResourceProperties'].get('CleanupSecurityHub', 'false') == 'true'
+
+                  if request_type == 'Delete':
+                      if cleanup_enabled:
+                          try:
+                              securityhub.describe_hub()
+                              print("Security Hub is enabled, disabling...")
+                              securityhub.disable_security_hub()
+                              reason = "Security Hub disabled"
+                          except ClientError as e:
+                              if e.response['Error']['Code'] == 'InvalidAccessException':
+                                  print("Security Hub not enabled, nothing to clean up")
+                                  reason = "Security Hub was not enabled"
+                              else:
+                                  raise
+                      else:
+                          print("CleanupSecurityHub=false, leaving Security Hub enabled")
+                          reason = "Security Hub left enabled (cleanup disabled)"
+
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, reason=reason)
+                      return
+
+                  if request_type in ['Create', 'Update']:
+                      # Check if Security Hub is already enabled
+                      try:
+                          hub = securityhub.describe_hub()
+                          print(f"Security Hub already enabled: {hub['HubArn']}")
+                          response_data['HubArn'] = hub['HubArn']
+                          response_data['Status'] = 'AlreadyEnabled'
+                          reason = "Security Hub was already enabled"
+                      except ClientError as e:
+                          if e.response['Error']['Code'] == 'InvalidAccessException':
+                              print("Security Hub not enabled, enabling now...")
+                              response = securityhub.enable_security_hub(
+                                  EnableDefaultStandards=False
+                              )
+                              response_data['HubArn'] = response['HubArn']
+                              response_data['Status'] = 'Enabled'
+                              reason = "Security Hub enabled successfully"
+                          else:
+                              raise
+
+                      # Verify GuardDuty integration
+                      products = securityhub.list_enabled_products_for_import()
+                      guardduty_product = next(
+                          (p for p in products['ProductSubscriptions'] if 'guardduty' in p.lower()),
+                          None
+                      )
+
+                      if guardduty_product:
+                          print(f"GuardDuty product integration verified: {guardduty_product}")
+                          response_data['GuardDutyIntegration'] = 'Enabled'
+                      else:
+                          print("Warning: GuardDuty product integration not found")
+                          response_data['GuardDutyIntegration'] = 'NotFound'
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  status = cfnresponse.FAILED
+                  reason = str(e)
+
+              cfnresponse.send(event, context, status, response_data, reason=reason)
+
+  SecurityHubEnabler:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SecurityHubEnablerLambda.Arn
+      CleanupSecurityHub: !Ref CleanupSecurityHub
+
+  # ============================================================================
+  # 2. VPC AND NETWORKING
+  # ============================================================================
+
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-vpc'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-private-subnet'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-public-subnet'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-igw'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-public-rt'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-private-rt'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # VPC Endpoints for AWS API access without NAT Gateway
+  EC2VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref DemoVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref DemoVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC endpoints
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-vpce-sg'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  # ============================================================================
+  # 3. GUARDDUTY DETECTOR LOOKUP (Custom Resource)
+  # ============================================================================
+
+  GuardDutyDetectorLookupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GuardDutyReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: guardduty:ListDetectors
+                Resource: '*'
+
+  GuardDutyDetectorLookupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-guardduty-lookup'
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt GuardDutyDetectorLookupLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+
+              guardduty = boto3.client('guardduty')
+              response_data = {}
+              status = cfnresponse.SUCCESS
+              reason = None
+
+              try:
+                  request_type = event['RequestType']
+
+                  if request_type == 'Delete':
+                      print("Delete request - nothing to clean up")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  if request_type in ['Create', 'Update']:
+                      response = guardduty.list_detectors()
+                      detector_ids = response.get('DetectorIds', [])
+
+                      if not detector_ids:
+                          raise Exception(
+                              "GuardDuty is not enabled in this region. "
+                              "Please enable GuardDuty before deploying this stack."
+                          )
+
+                      detector_id = detector_ids[0]
+                      print(f"Found GuardDuty detector: {detector_id}")
+
+                      response_data = {
+                          'DetectorId': detector_id
+                      }
+
+                      reason = f"Found detector: {detector_id}"
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  status = cfnresponse.FAILED
+                  reason = str(e)
+
+              cfnresponse.send(event, context, status, response_data, reason=reason)
+
+  GuardDutyDetectorLookup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt GuardDutyDetectorLookupLambda.Arn
+
+  # ============================================================================
+  # 4. EC2 SIMULATED TARGET INSTANCE
+  # ============================================================================
+
+  SimulatedInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Deny-all security group for simulated crypto-mining target
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-instance-sg'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  SimulatedInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  SimulatedInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SimulatedInstanceRole
+
+  SimulatedInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: t3.nano
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SimulatedInstanceSecurityGroup
+      IamInstanceProfile: !Ref SimulatedInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-target'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+        - Key: Purpose
+          Value: sim-target
+
+  SecondaryNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      GroupSet:
+        - !Ref SimulatedInstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-eth1'
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  SecondaryNetworkInterfaceAttachment:
+    Type: AWS::EC2::NetworkInterfaceAttachment
+    Properties:
+      InstanceId: !Ref SimulatedInstance
+      NetworkInterfaceId: !Ref SecondaryNetworkInterface
+      DeviceIndex: 1
+
+  # ============================================================================
+  # 5. IAM SEEDER ROLE
+  # ============================================================================
+
+  SeederRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-seeder'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: CloudTrailSeeding
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudTrailSeeding
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:DescribeInstances
+                  - ec2:TerminateInstances
+                  - ec2:CreateTags
+                Resource: '*'
+              - Sid: PassRoleForInstanceProfile
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': ec2.amazonaws.com
+      Tags:
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+  # ============================================================================
+  # 6. CLOUDTRAIL SEEDING (Custom Resource)
+  # ============================================================================
+
+  CloudTrailSeederLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCExecutionRole
+      Policies:
+        - PolicyName: AssumeSeederRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt SeederRole.Arn
+
+  CloudTrailSeederLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-cloudtrail-seeder'
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt CloudTrailSeederLambdaRole.Arn
+      Timeout: 300
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet
+        SecurityGroupIds:
+          - !Ref VPCEndpointSecurityGroup
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import time
+          from datetime import datetime
+
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+
+              response_data = {}
+              status = cfnresponse.SUCCESS
+              reason = None
+
+              try:
+                  request_type = event['RequestType']
+
+                  if request_type == 'Delete':
+                      print("Delete request - CloudTrail events persist, nothing to clean up")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  if request_type in ['Create', 'Update']:
+                      seeder_role_arn = event['ResourceProperties']['SeederRoleArn']
+                      subnet_id = event['ResourceProperties']['SubnetId']
+                      security_group_id = event['ResourceProperties']['SecurityGroupId']
+
+                      print(f"Assuming seeder role: {seeder_role_arn}")
+
+                      # Assume the seeder role to get temporary credentials
+                      sts = boto3.client('sts')
+                      assumed = sts.assume_role(
+                          RoleArn=seeder_role_arn,
+                          RoleSessionName='cloudtrail-seeding-session'
+                      )
+
+                      credentials = assumed['Credentials']
+                      access_key_id = credentials['AccessKeyId']
+
+                      print(f"Assumed role with access key: {access_key_id}")
+
+                      # Create EC2 client with assumed credentials
+                      ec2 = boto3.client(
+                          'ec2',
+                          aws_access_key_id=credentials['AccessKeyId'],
+                          aws_secret_access_key=credentials['SecretAccessKey'],
+                          aws_session_token=credentials['SessionToken']
+                      )
+
+                      # Look up latest Amazon Linux 2023 AMI
+                      ami_response = boto3.client('ssm').get_parameter(
+                          Name='/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+                      )
+                      ami_id = ami_response['Parameter']['Value']
+
+                      print(f"Using AMI: {ami_id}")
+
+                      # Launch a t3.nano instance to seed CloudTrail
+                      print("Launching seeding instance...")
+                      run_response = ec2.run_instances(
+                          ImageId=ami_id,
+                          InstanceType='t3.nano',
+                          MinCount=1,
+                          MaxCount=1,
+                          SubnetId=subnet_id,
+                          SecurityGroupIds=[security_group_id],
+                          TagSpecifications=[
+                              {
+                                  'ResourceType': 'instance',
+                                  'Tags': [
+                                      {'Key': 'Name', 'Value': 'cryptomining-demo-cloudtrail-seeder'},
+                                      {'Key': 'Purpose', 'Value': 'cloudtrail-seeding'}
+                                  ]
+                              }
+                          ]
+                      )
+
+                      seeded_instance_id = run_response['Instances'][0]['InstanceId']
+                      print(f"Launched seeding instance: {seeded_instance_id}")
+
+                      # Wait for instance to be running
+                      waiter = ec2.get_waiter('instance_running')
+                      waiter.wait(InstanceIds=[seeded_instance_id])
+                      print(f"Instance {seeded_instance_id} is now running")
+
+                      # Immediately terminate the instance
+                      print(f"Terminating seeding instance: {seeded_instance_id}")
+                      ec2.terminate_instances(InstanceIds=[seeded_instance_id])
+
+                      response_data = {
+                          'AccessKeyId': access_key_id,
+                          'SeededInstanceId': seeded_instance_id,
+                          'SeederRoleArn': seeder_role_arn,
+                          'SeededAt': datetime.utcnow().isoformat() + 'Z'
+                      }
+
+                      reason = f"Successfully seeded CloudTrail with access key {access_key_id}"
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  import traceback
+                  traceback.print_exc()
+                  status = cfnresponse.FAILED
+                  reason = str(e)
+
+              cfnresponse.send(event, context, status, response_data, reason=reason)
+
+  CloudTrailSeeder:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - SeederRole
+      - SimulatedInstance
+      - EC2VPCEndpoint
+    Properties:
+      ServiceToken: !GetAtt CloudTrailSeederLambda.Arn
+      SeederRoleArn: !GetAtt SeederRole.Arn
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupId: !Ref VPCEndpointSecurityGroup
+
+  # ============================================================================
+  # 7. SSM PARAMETER (Simulation Manifest)
+  # ============================================================================
+
+  SimulationManifestParameter:
+    Type: AWS::SSM::Parameter
+    DependsOn: CloudTrailSeeder
+    Properties:
+      Name: !Sub '/cryptomining-demo/${IdentityDetector.UserIdentifier}/manifest'
+      Type: String
+      Value: !Sub |
+        {
+          "version": 1,
+          "account": "${AWS::AccountId}",
+          "region": "${AWS::Region}",
+          "stack_name": "${AWS::StackName}",
+          "detector_id": "${GuardDutyDetectorLookup.DetectorId}",
+          "instance": {
+            "id": "${SimulatedInstance}",
+            "type": "t3.nano",
+            "vpc_id": "${DemoVPC}",
+            "eni_ids": [
+              "${SimulatedInstance.PrimaryNetworkInterfaceId}",
+              "${SecondaryNetworkInterface}"
+            ]
+          },
+          "seeder": {
+            "principal_arn": "${SeederRole.Arn}",
+            "access_key_id": "${CloudTrailSeeder.AccessKeyId}",
+            "role_name": "${SeederRole}"
+          },
+          "seeded_at": "${CloudTrailSeeder.SeededAt}"
+        }
+      Tags:
+        Name: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-manifest'
+        user: !GetAtt IdentityDetector.RawIdentity
+
+  # ============================================================================
+  # 8. BEACON LAMBDA
+  # ============================================================================
+
+  BeaconLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BeaconPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - guardduty:CreateSampleFindings
+                  - securityhub:GetFindings
+                Resource: '*'
+
+  BeaconLambda:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - GuardDutyDetectorLookup
+      - SimulatedInstance
+      - SecurityHubEnabler
+    Properties:
+      FunctionName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-beacon'
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BeaconLambdaRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          DETECTOR_ID: !GetAtt GuardDutyDetectorLookup.DetectorId
+          PRODUCT_ARN: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:product/${AWS::AccountId}/default'
+          INSTANCE_ARN: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${SimulatedInstance}'
+          REGION: !Ref AWS::Region
+          USER_IDENTIFIER: !GetAtt IdentityDetector.UserIdentifier
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+
+          guardduty = boto3.client('guardduty')
+          securityhub = boto3.client('securityhub')
+
+          DETECTOR_ID = os.environ['DETECTOR_ID']
+          INSTANCE_ARN = os.environ['INSTANCE_ARN']
+          REGION = os.environ['REGION']
+          USER_IDENTIFIER = os.environ['USER_IDENTIFIER']
+
+          def handler(event, context):
+              print(f"Beacon invoked at {datetime.utcnow().isoformat()}Z")
+              print(f"Detector ID: {DETECTOR_ID}")
+              print(f"Instance ARN: {INSTANCE_ARN}")
+              print(f"User Identifier: {USER_IDENTIFIER}")
+
+              try:
+                  # Check if finding already exists and is in NOTIFIED state
+                  findings_response = securityhub.get_findings(
+                      Filters={
+                          'ProductName': [{'Value': 'GuardDuty', 'Comparison': 'EQUALS'}],
+                          'Type': [{'Value': 'TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS', 'Comparison': 'EQUALS'}],
+                          'ResourceId': [{'Value': INSTANCE_ARN, 'Comparison': 'EQUALS'}]
+                      },
+                      MaxResults=1
+                  )
+
+                  if findings_response['Findings']:
+                      finding = findings_response['Findings'][0]
+                      workflow_status = finding.get('Workflow', {}).get('Status', 'NEW')
+
+                      print(f"Found existing finding: {finding['Id']}")
+                      print(f"Workflow status: {workflow_status}")
+
+                      if workflow_status == 'NOTIFIED':
+                          print("Finding is already NOTIFIED, skipping sample generation")
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps({
+                                  'message': 'Finding already NOTIFIED, beacon paused',
+                                  'finding_id': finding['Id']
+                              })
+                          }
+
+                  # Create sample finding
+                  print("Creating sample GuardDuty finding...")
+                  guardduty.create_sample_findings(
+                      DetectorId=DETECTOR_ID,
+                      FindingTypes=['CryptoCurrency:EC2/BitcoinTool.B!DNS']
+                  )
+
+                  print("Sample finding created successfully")
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Sample finding created',
+                          'detector_id': DETECTOR_ID,
+                          'instance_arn': INSTANCE_ARN,
+                          'timestamp': datetime.utcnow().isoformat() + 'Z'
+                      })
+                  }
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  import traceback
+                  traceback.print_exc()
+                  raise
+
+  BeaconLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cryptomining-demo-${IdentityDetector.UserIdentifier}-beacon'
+      RetentionInDays: 7
+
+  BeaconScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-beacon-schedule'
+      Description: Trigger beacon Lambda every 3 minutes to create sample GuardDuty findings
+      ScheduleExpression: 'rate(3 minutes)'
+      State: !Ref BeaconEnabled
+      Targets:
+        - Arn: !GetAtt BeaconLambda.Arn
+          Id: BeaconLambdaTarget
+
+  BeaconSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BeaconLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BeaconScheduleRule.Arn
+
+  BeaconErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-beacon-errors'
+      AlarmDescription: Alert when beacon Lambda errors exceed threshold
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BeaconLambda
+
+  # ============================================================================
+  # 9. API DESTINATION INVOKE ROLE
+  # ============================================================================
+
+  ApiDestinationInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeApiDestination
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:api-destination/cryptomining-demo-${IdentityDetector.UserIdentifier}-*'
+      Tags:
+        - Key: user
+          Value: !GetAtt IdentityDetector.RawIdentity
+
+Outputs:
+  UserIdentifier:
+    Description: Sanitized user identifier (user-domain format)
+    Value: !GetAtt IdentityDetector.UserIdentifier
+    Export:
+      Name: !Sub '${AWS::StackName}-UserIdentifier'
+
+  RawIdentity:
+    Description: Raw identity extracted from ARN
+    Value: !GetAtt IdentityDetector.RawIdentity
+    Export:
+      Name: !Sub '${AWS::StackName}-RawIdentity'
+
+  DeployerArn:
+    Description: Full ARN of the deploying principal
+    Value: !GetAtt IdentityDetector.CallerArn
+    Export:
+      Name: !Sub '${AWS::StackName}-DeployerArn'
+
+  GuardDutyDetectorId:
+    Description: GuardDuty detector ID
+    Value: !GetAtt GuardDutyDetectorLookup.DetectorId
+    Export:
+      Name: !Sub '${AWS::StackName}-DetectorId'
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref DemoVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  SimulatedInstanceId:
+    Description: EC2 instance ID (target for Task 2 containment)
+    Value: !Ref SimulatedInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  SimulatedInstanceArn:
+    Description: Full EC2 instance ARN
+    Value: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${SimulatedInstance}'
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceArn'
+
+  PrimaryEniId:
+    Description: Primary network interface ID (eth0)
+    Value: !GetAtt SimulatedInstance.PrimaryNetworkInterfaceId
+    Export:
+      Name: !Sub '${AWS::StackName}-PrimaryEniId'
+
+  SecondaryEniId:
+    Description: Secondary network interface ID (eth1)
+    Value: !Ref SecondaryNetworkInterface
+    Export:
+      Name: !Sub '${AWS::StackName}-SecondaryEniId'
+
+  SeederRoleArn:
+    Description: ARN of IAM seeder role (target for Task 3 credential revocation)
+    Value: !GetAtt SeederRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SeederRoleArn'
+
+  SeederAccessKeyId:
+    Description: Temporary access key ID used for CloudTrail seeding (ASIA* prefix)
+    Value: !GetAtt CloudTrailSeeder.AccessKeyId
+    Export:
+      Name: !Sub '${AWS::StackName}-SeederAccessKeyId'
+
+  SimulationManifestParameter:
+    Description: SSM parameter name containing simulation manifest
+    Value: !Ref SimulationManifestParameter
+    Export:
+      Name: !Sub '${AWS::StackName}-ManifestParameter'
+
+  BeaconScheduleRuleName:
+    Description: EventBridge rule name for beacon schedule (for manual enable/disable)
+    Value: !Ref BeaconScheduleRule
+    Export:
+      Name: !Sub '${AWS::StackName}-BeaconScheduleRule'
+
+  ApiDestinationInvokeRoleArn:
+    Description: ARN of EventBridge API destination invoke role
+    Value: !GetAtt ApiDestinationInvokeRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiDestinationInvokeRoleArn'

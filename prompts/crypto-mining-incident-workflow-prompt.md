@@ -29,11 +29,13 @@ Build a workflow that:
    - Attach an inline deny-all policy to the seeder role to immediately block its use
 
 6. **Provides testing capability**:
-   - Include a separate step (disconnected from main flow) that posts a sample crypto-mining finding to the webhook for manual testing
+   - Include a separate "Test - Post Sample Finding" step that generates a sample crypto-mining finding
+   - This test step should link directly to "Receive Finding" (not exposed as an external route)
+   - Can be run from the workflow editor to test the full flow without external webhook access
 
 ## Expected Behavior
 - Webhook receives finding → enriches with CloudTrail + EC2 data → updates Security Hub → isolates network → revokes credentials
 - Each step should log its actions for audit purposes
-- The testing step allows manual verification without deploying EventBridge routing
+- The testing step can be run internally from the workflow editor to generate a sample finding and pass it through the full response flow without requiring external webhook access or EventBridge routing
 
 Build this workflow now.
