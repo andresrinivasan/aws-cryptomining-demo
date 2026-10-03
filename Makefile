@@ -2,7 +2,11 @@
 
 # Default values (can be overridden via environment variables)
 AWS_REGION ?= us-west-1
+AWS_PROFILE ?=
 STACK_NAME ?= cryptomining-demo-$(shell whoami)
+
+# Set up AWS CLI profile argument
+PROFILE_ARG := $(if $(AWS_PROFILE),--profile $(AWS_PROFILE),)
 
 # Colors for output
 BLUE := \033[0;34m
@@ -17,17 +21,19 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(BLUE)Environment Variables:$(NC)"
 	@echo "  AWS_REGION=$(AWS_REGION)"
+	@echo "  AWS_PROFILE=$(AWS_PROFILE)"
 	@echo "  STACK_NAME=$(STACK_NAME)"
 	@echo ""
 	@echo "$(BLUE)Examples:$(NC)"
-	@echo "  make deploy                    # Deploy with defaults"
+	@echo "  make deploy                         # Deploy with defaults"
+	@echo "  make deploy AWS_PROFILE=sandbox     # Deploy with specific profile"
 	@echo "  make deploy AWS_REGION=us-east-1"
 	@echo "  make enable-beacon"
 	@echo "  make logs"
 	@echo ""
 
 deploy: ## Deploy the CloudFormation stack
-	@./deploy.sh --region $(AWS_REGION) --stack-name $(STACK_NAME)
+	@./deploy.sh --region $(AWS_REGION) --stack-name $(STACK_NAME) $(if $(AWS_PROFILE),--profile $(AWS_PROFILE),)
 
 deploy-with-beacon: ## Deploy with beacon enabled
 	@./deploy.sh --region $(AWS_REGION) --stack-name $(STACK_NAME) --beacon-enabled
@@ -37,7 +43,7 @@ deploy-verify: ## Deploy and run verification checks
 
 status: ## Show stack status
 	@echo "$(BLUE)Stack Status:$(NC)"
-	@aws cloudformation describe-stacks \
+	@aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].{Status:StackStatus,Created:CreationTime}' \
@@ -45,7 +51,7 @@ status: ## Show stack status
 
 outputs: ## Show stack outputs
 	@echo "$(BLUE)Stack Outputs:$(NC)"
-	@aws cloudformation describe-stacks \
+	@aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' \
@@ -53,32 +59,32 @@ outputs: ## Show stack outputs
 
 enable-beacon: ## Enable the beacon schedule
 	@echo "$(BLUE)Enabling beacon...$(NC)"
-	@BEACON_RULE=$$(aws cloudformation describe-stacks \
+	@BEACON_RULE=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`BeaconScheduleRuleName`].OutputValue' \
 		--output text); \
-	aws events enable-rule --region $(AWS_REGION) --name $$BEACON_RULE && \
+	aws $(PROFILE_ARG) events enable-rule --region $(AWS_REGION) --name $$BEACON_RULE && \
 	echo "$(GREEN)✓ Beacon enabled (first invocation in 3 minutes)$(NC)"
 
 disable-beacon: ## Disable the beacon schedule
 	@echo "$(BLUE)Disabling beacon...$(NC)"
-	@BEACON_RULE=$$(aws cloudformation describe-stacks \
+	@BEACON_RULE=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`BeaconScheduleRuleName`].OutputValue' \
 		--output text); \
-	aws events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE && \
+	aws $(PROFILE_ARG) events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE && \
 	echo "$(GREEN)✓ Beacon disabled$(NC)"
 
 logs: ## Tail beacon Lambda logs
 	@echo "$(BLUE)Tailing beacon logs (Ctrl+C to exit)...$(NC)"
-	@USER_ID=$$(aws cloudformation describe-stacks \
+	@USER_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`UserIdentifier`].OutputValue' \
 		--output text); \
-	aws logs tail /aws/lambda/cryptomining-demo-$$USER_ID-beacon \
+	aws $(PROFILE_ARG) logs tail /aws/lambda/cryptomining-demo-$$USER_ID-beacon \
 		--region $(AWS_REGION) \
 		--follow \
 		--since 5m
@@ -86,13 +92,13 @@ logs: ## Tail beacon Lambda logs
 verify: ## Run verification checks
 	@echo "$(BLUE)Running verification checks...$(NC)"
 	@echo ""
-	@USER_ID=$$(aws cloudformation describe-stacks \
+	@USER_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`UserIdentifier`].OutputValue' \
 		--output text); \
 	echo "$(BLUE)1. Checking SSM manifest parameter...$(NC)"; \
-	if aws ssm get-parameter \
+	if aws $(PROFILE_ARG) ssm get-parameter \
 		--region $(AWS_REGION) \
 		--name "/cryptomining-demo/$$USER_ID/manifest" \
 		--query 'Parameter.Value' \
@@ -103,7 +109,7 @@ verify: ## Run verification checks
 	fi; \
 	echo ""; \
 	echo "$(BLUE)2. Checking CloudTrail seeding...$(NC)"; \
-	if aws cloudtrail lookup-events \
+	if aws $(PROFILE_ARG) cloudtrail lookup-events \
 		--region $(AWS_REGION) \
 		--lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances \
 		--max-results 10 \
@@ -115,12 +121,12 @@ verify: ## Run verification checks
 	fi; \
 	echo ""; \
 	echo "$(BLUE)3. Checking EC2 instance...$(NC)"; \
-	INSTANCE_ID=$$(aws cloudformation describe-stacks \
+	INSTANCE_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`SimulatedInstanceId`].OutputValue' \
 		--output text); \
-	INSTANCE_STATE=$$(aws ec2 describe-instances \
+	INSTANCE_STATE=$$(aws $(PROFILE_ARG) ec2 describe-instances \
 		--region $(AWS_REGION) \
 		--instance-ids $$INSTANCE_ID \
 		--query 'Reservations[0].Instances[0].State.Name' \
@@ -132,12 +138,12 @@ verify: ## Run verification checks
 	fi; \
 	echo ""; \
 	echo "$(BLUE)4. Checking Security Hub finding...$(NC)"; \
-	INSTANCE_ARN=$$(aws cloudformation describe-stacks \
+	INSTANCE_ARN=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`SimulatedInstanceArn`].OutputValue' \
 		--output text); \
-	FINDING_COUNT=$$(aws securityhub get-findings \
+	FINDING_COUNT=$$(aws $(PROFILE_ARG) securityhub get-findings \
 		--region $(AWS_REGION) \
 		--filters '{"ProductName":[{"Value":"GuardDuty","Comparison":"EQUALS"}],"ResourceId":[{"Value":"'$$INSTANCE_ARN'","Comparison":"EQUALS"}]}' \
 		--query 'length(Findings)' \
@@ -149,19 +155,19 @@ verify: ## Run verification checks
 	fi
 
 finding: ## Show the Security Hub finding
-	@INSTANCE_ARN=$$(aws cloudformation describe-stacks \
+	@INSTANCE_ARN=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'Stacks[0].Outputs[?OutputKey==`SimulatedInstanceArn`].OutputValue' \
 		--output text); \
-	aws securityhub get-findings \
+	aws $(PROFILE_ARG) securityhub get-findings \
 		--region $(AWS_REGION) \
 		--filters '{"ProductName":[{"Value":"GuardDuty","Comparison":"EQUALS"}],"ResourceId":[{"Value":"'$$INSTANCE_ARN'","Comparison":"EQUALS"}]}' \
 		--query 'Findings[0].{Id:Id,Status:Workflow.Status,Severity:Severity.Label,Title:Title,UpdatedAt:UpdatedAt}' \
 		--output table
 
 events: ## Show recent CloudFormation stack events
-	@aws cloudformation describe-stack-events \
+	@aws $(PROFILE_ARG) cloudformation describe-stack-events \
 		--region $(AWS_REGION) \
 		--stack-name $(STACK_NAME) \
 		--query 'StackEvents[0:20].[Timestamp,ResourceStatus,ResourceType,ResourceStatusReason]' \
@@ -173,20 +179,20 @@ clean: ## Delete the CloudFormation stack
 	echo; \
 	if [ "$$REPLY" = "y" ] || [ "$$REPLY" = "Y" ]; then \
 		echo "$(BLUE)Disabling beacon...$(NC)"; \
-		BEACON_RULE=$$(aws cloudformation describe-stacks \
+		BEACON_RULE=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
 			--region $(AWS_REGION) \
 			--stack-name $(STACK_NAME) \
 			--query 'Stacks[0].Outputs[?OutputKey==`BeaconScheduleRuleName`].OutputValue' \
 			--output text 2>/dev/null); \
 		if [ -n "$$BEACON_RULE" ]; then \
-			aws events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE 2>/dev/null || true; \
+			aws $(PROFILE_ARG) events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE 2>/dev/null || true; \
 		fi; \
 		echo "$(BLUE)Deleting stack...$(NC)"; \
-		aws cloudformation delete-stack \
+		aws $(PROFILE_ARG) cloudformation delete-stack \
 			--region $(AWS_REGION) \
 			--stack-name $(STACK_NAME); \
 		echo "$(BLUE)Waiting for deletion to complete...$(NC)"; \
-		aws cloudformation wait stack-delete-complete \
+		aws $(PROFILE_ARG) cloudformation wait stack-delete-complete \
 			--region $(AWS_REGION) \
 			--stack-name $(STACK_NAME) 2>/dev/null && \
 		echo "$(GREEN)✓ Stack deleted successfully$(NC)" || \
