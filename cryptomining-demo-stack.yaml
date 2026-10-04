@@ -332,69 +332,6 @@ Resources:
     Properties:
       SubnetId: !Ref PrivateSubnet
       RouteTableId: !Ref PrivateRouteTable
-
-  # VPC Endpoints for AWS API access without NAT Gateway
-  EC2VPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref DemoVPC
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateSubnet
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
-
-  SSMVPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref DemoVPC
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateSubnet
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
-
-  STSVPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref DemoVPC
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateSubnet
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
-
-  S3VPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref DemoVPC
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
-      VpcEndpointType: Gateway
-      RouteTableIds:
-        - !Ref PrivateRouteTable
-
-  VPCEndpointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for VPC endpoints
-      VpcId: !Ref DemoVPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 10.0.0.0/16
-      Tags:
-        - Key: Name
-          Value: !Sub 'cryptomining-demo-${IdentityDetector.UserIdentifier}-vpce-sg'
-        - Key: user
-          Value: !GetAtt IdentityDetector.RawIdentity
-
   # ============================================================================
   # 3. GUARDDUTY DETECTOR LOOKUP (Custom Resource)
   # ============================================================================
@@ -610,7 +547,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: AssumeSeederRole
           PolicyDocument:
@@ -628,11 +565,6 @@ Resources:
       Handler: index.handler
       Role: !GetAtt CloudTrailSeederLambdaRole.Arn
       Timeout: 300
-      VpcConfig:
-        SubnetIds:
-          - !Ref PrivateSubnet
-        SecurityGroupIds:
-          - !Ref VPCEndpointSecurityGroup
       Code:
         ZipFile: |
           import json
@@ -761,12 +693,11 @@ Resources:
     DependsOn:
       - SeederRole
       - SimulatedInstance
-      - EC2VPCEndpoint
     Properties:
       ServiceToken: !GetAtt CloudTrailSeederLambda.Arn
       SeederRoleArn: !GetAtt SeederRole.Arn
       SubnetId: !Ref PrivateSubnet
-      SecurityGroupId: !Ref VPCEndpointSecurityGroup
+      SecurityGroupId: !Ref SimulatedInstanceSecurityGroup
 
   # ============================================================================
   # 7. SSM PARAMETER (Simulation Manifest)
