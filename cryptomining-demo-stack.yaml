@@ -640,6 +640,7 @@ Resources:
           import cfnresponse
           import time
           from datetime import datetime
+          from botocore.exceptions import ClientError
 
           def handler(event, context):
               print(f"Received event: {json.dumps(event)}")
@@ -664,11 +665,25 @@ Resources:
                       print(f"Assuming seeder role: {seeder_role_arn}")
 
                       # Assume the seeder role to get temporary credentials
+                      # Retry on AccessDenied due to IAM eventual consistency
                       sts = boto3.client('sts')
-                      assumed = sts.assume_role(
-                          RoleArn=seeder_role_arn,
-                          RoleSessionName='cloudtrail-seeding-session'
-                      )
+                      max_retries = 10
+                      retry_delay = 2
+
+                      for attempt in range(max_retries):
+                          try:
+                              assumed = sts.assume_role(
+                                  RoleArn=seeder_role_arn,
+                                  RoleSessionName='cloudtrail-seeding-session'
+                              )
+                              break
+                          except ClientError as e:
+                              if e.response['Error']['Code'] == 'AccessDenied' and attempt < max_retries - 1:
+                                  print(f"AccessDenied on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                                  time.sleep(retry_delay)
+                                  retry_delay *= 2  # Exponential backoff
+                              else:
+                                  raise
 
                       credentials = assumed['Credentials']
                       access_key_id = credentials['AccessKeyId']
