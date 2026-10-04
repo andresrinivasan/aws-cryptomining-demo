@@ -340,6 +340,7 @@ Resources:
       VpcId: !Ref DemoVPC
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
       VpcEndpointType: Interface
+      PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet
       SecurityGroupIds:
@@ -351,6 +352,7 @@ Resources:
       VpcId: !Ref DemoVPC
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
       VpcEndpointType: Interface
+      PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet
       SecurityGroupIds:
@@ -362,6 +364,7 @@ Resources:
       VpcId: !Ref DemoVPC
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
       VpcEndpointType: Interface
+      PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet
       SecurityGroupIds:
