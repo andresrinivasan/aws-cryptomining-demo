@@ -200,10 +200,12 @@ Resources:
                       except ClientError as e:
                           if e.response['Error']['Code'] == 'InvalidAccessException':
                               print("Security Hub not enabled, enabling now...")
-                              response = securityhub.enable_security_hub(
+                              securityhub.enable_security_hub(
                                   EnableDefaultStandards=False
                               )
-                              response_data['HubArn'] = response['HubArn']
+                              # Call describe_hub to get the HubArn
+                              hub = securityhub.describe_hub()
+                              response_data['HubArn'] = hub['HubArn']
                               response_data['Status'] = 'Enabled'
                               reason = "Security Hub enabled successfully"
                           else:

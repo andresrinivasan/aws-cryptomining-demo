@@ -187,6 +187,31 @@ clean: ## Delete the CloudFormation stack
 		if [ -n "$$BEACON_RULE" ]; then \
 			aws $(PROFILE_ARG) events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE 2>/dev/null || true; \
 		fi; \
+		echo "$(BLUE)Checking for GuardDuty VPC endpoints...$(NC)"; \
+		VPC_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stack-resources \
+			--region $(AWS_REGION) \
+			--stack-name $(STACK_NAME) \
+			--logical-resource-id DemoVPC \
+			--query 'StackResources[0].PhysicalResourceId' \
+			--output text 2>/dev/null); \
+		if [ -n "$$VPC_ID" ] && [ "$$VPC_ID" != "None" ]; then \
+			GD_ENDPOINTS=$$(aws $(PROFILE_ARG) ec2 describe-vpc-endpoints \
+				--region $(AWS_REGION) \
+				--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+				--query 'VpcEndpoints[].VpcEndpointId' \
+				--output text 2>/dev/null); \
+			if [ -n "$$GD_ENDPOINTS" ]; then \
+				echo "$(YELLOW)⚠ Found GuardDuty-managed VPC endpoints, deleting...$(NC)"; \
+				for ENDPOINT in $$GD_ENDPOINTS; do \
+					echo "  Deleting $$ENDPOINT..."; \
+					aws $(PROFILE_ARG) ec2 delete-vpc-endpoints \
+						--region $(AWS_REGION) \
+						--vpc-endpoint-ids $$ENDPOINT 2>/dev/null || true; \
+				done; \
+				echo "$(BLUE)Waiting 30s for ENI detachment...$(NC)"; \
+				sleep 30; \
+			fi; \
+		fi; \
 		echo "$(BLUE)Deleting stack...$(NC)"; \
 		aws $(PROFILE_ARG) cloudformation delete-stack \
 			--region $(AWS_REGION) \

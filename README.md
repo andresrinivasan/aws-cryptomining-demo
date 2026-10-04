@@ -359,7 +359,56 @@ Expected: `arn:aws:securityhub:us-west-1::product/aws/guardduty`
 
 If missing, enable in Security Hub console: Integrations → Enable GuardDuty
 
-### Issue: Stack deletion fails on VPC
+### Issue: Stack deletion fails on VPC (GuardDuty VPC endpoints)
+
+**Cause:** GuardDuty automatically creates VPC endpoints for Runtime Monitoring (service: `com.amazonaws.<region>.guardduty-data`) within 5-10 minutes of VPC creation. These endpoints are tagged `GuardDutyManaged=true` and block subnet deletion because CloudFormation doesn't know about them.
+
+**Symptoms:**
+- Stack stuck in `DELETE_FAILED` state
+- Error: "The subnet has dependencies and cannot be deleted"
+- Subnet deletion fails even though EC2 instance is terminated
+
+**Fix (Automatic):** The `make clean` target now handles this automatically.
+
+**Fix (Manual):** If you need to recover a stuck stack:
+
+```bash
+# 1. Find the VPC ID from the failed stack
+VPC_ID=$(aws cloudformation describe-stack-resources \
+  --region $AWS_REGION \
+  --stack-name $STACK_NAME \
+  --logical-resource-id DemoVPC \
+  --query 'StackResources[0].PhysicalResourceId' \
+  --output text)
+
+# 2. Find GuardDuty-managed VPC endpoints
+aws ec2 describe-vpc-endpoints \
+  --region $AWS_REGION \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+  --query 'VpcEndpoints[].[VpcEndpointId,ServiceName,State]' \
+  --output table
+
+# 3. Delete the GuardDuty VPC endpoints
+GD_ENDPOINTS=$(aws ec2 describe-vpc-endpoints \
+  --region $AWS_REGION \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+  --query 'VpcEndpoints[].VpcEndpointId' \
+  --output text)
+
+aws ec2 delete-vpc-endpoints \
+  --region $AWS_REGION \
+  --vpc-endpoint-ids $GD_ENDPOINTS
+
+# 4. Wait 30 seconds for ENI detachment
+sleep 30
+
+# 5. Retry stack deletion
+aws cloudformation delete-stack --region $AWS_REGION --stack-name $STACK_NAME
+```
+
+**Prevention:** Delete the stack within 5 minutes of creation (before GuardDuty creates endpoints), or use `make clean` which handles this automatically.
+
+### Issue: Stack deletion fails on VPC (ENI still attached)
 
 **Cause:** ENI from EC2 instance still attached
 
