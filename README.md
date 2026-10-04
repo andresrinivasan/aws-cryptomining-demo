@@ -36,16 +36,15 @@ GuardDuty Finding → Security Hub → EventBridge → Tines Webhook
 ```
 VPC (10.0.0.0/16)
 ├── Private Subnet (10.0.1.0/24)
-│   ├── Simulated EC2 Instance (t3.nano)
-│   │   ├── eth0 (Primary ENI) - auto-assigned private IP
-│   │   └── eth1 (Secondary ENI) - auto-assigned private IP
-│   ├── VPC Endpoint (EC2) - Interface
-│   └── VPC Endpoint (SSM) - Interface
+│   └── Simulated EC2 Instance (t3.nano)
+│       ├── eth0 (Primary ENI) - auto-assigned private IP
+│       └── eth1 (Secondary ENI) - auto-assigned private IP
 ├── Public Subnet (10.0.2.0/24)
 │   └── Internet Gateway
 └── Security Groups
-    ├── Instance SG (deny-all)
-    └── VPC Endpoint SG (HTTPS from 10.0.0.0/16)
+    └── Instance SG (deny-all)
+
+Note: Lambda functions run outside the VPC for simplicity and cost savings.
 ```
 
 ## Prerequisites
@@ -466,16 +465,15 @@ aws cloudformation delete-stack --region $AWS_REGION --stack-name $STACK_NAME
 | Resource | Monthly Cost |
 |----------|--------------|
 | EC2 t3.nano (730 hrs) | $3.80 |
-| VPC Endpoints (2 endpoints × 730 hrs) | $14.60 |
 | Lambda Invocations + Duration | $0.00 (free tier) |
 | CloudWatch Logs (~100 MB) | $0.05 |
 | Security Hub Findings | $0.00 (no standards) |
-| **TOTAL** | **~$18.45/month** |
+| **TOTAL** | **~$3.85/month** |
 
 **Cost Optimization:**
 - **Disable beacon when not demoing** - Saves minimal (mostly CloudWatch Logs)
 - **Delete stack when not in use** - Zero cost, redeploy takes 5-8 minutes
-- **Keep VPC endpoints** - Cheaper than NAT Gateway (~$32/month)
+- **No VPC endpoints needed** - Lambda runs outside VPC, accesses AWS APIs directly
 
 ## Key Features
 
@@ -493,10 +491,11 @@ The infrastructure is designed for shared AWS accounts where multiple Tines SEs 
 
 ### Cost Optimization
 
-- Private VPC with VPC endpoints (no NAT Gateway)
+- Lambda functions outside VPC (no VPC endpoints needed, faster cold starts)
 - t3.nano instances (minimal compute cost)
 - CloudTrail Event History (free, no trail required)
 - Beacon schedule disabled by default
+- No NAT Gateway or VPC endpoints (~$22/month saved)
 
 ## Technical Details
 
