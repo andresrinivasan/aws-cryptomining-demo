@@ -943,12 +943,6 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-RawIdentity'
 
-  DeployerArn:
-    Description: Full ARN of the deploying principal
-    Value: !GetAtt IdentityDetector.CallerArn
-    Export:
-      Name: !Sub '${AWS::StackName}-DeployerArn'
-
   GuardDutyDetectorId:
     Description: GuardDuty detector ID
     Value: !GetAtt GuardDutyDetectorLookup.DetectorId
