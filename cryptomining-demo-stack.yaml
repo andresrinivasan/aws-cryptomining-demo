@@ -239,7 +239,32 @@ Resources:
       CleanupSecurityHub: !Ref CleanupSecurityHub
 
   # ============================================================================
-  # 2. SEEDER ROLE (Early creation for IAM propagation)
+  # 2. CLOUDTRAIL SEEDER LAMBDA ROLE (Created first to break circular dependency)
+  # ============================================================================
+
+  CloudTrailSeederLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AssumeSeederRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cryptomining-demo-${IdentityDetector.UserIdentifier}-SeederRole-*'
+
+  # ============================================================================
+  # 3. SEEDER ROLE (Early creation for IAM propagation)
   # ============================================================================
 
   SeederRole:
@@ -250,11 +275,8 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: lambda.amazonaws.com
+              AWS: !GetAtt CloudTrailSeederLambdaRole.Arn
             Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                'aws:SourceAccount': !Ref AWS::AccountId
       Policies:
         - PolicyName: CloudTrailSeeding
           PolicyDocument:
@@ -537,27 +559,6 @@ Resources:
   # ============================================================================
   # 5. CLOUDTRAIL SEEDING (Custom Resource)
   # ============================================================================
-
-  CloudTrailSeederLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: AssumeSeederRole
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: sts:AssumeRole
-                Resource: !GetAtt SeederRole.Arn
 
   CloudTrailSeederLambda:
     Type: AWS::Lambda::Function
