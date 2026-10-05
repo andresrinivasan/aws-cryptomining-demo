@@ -566,7 +566,7 @@ Resources:
       Runtime: python3.13
       Handler: index.handler
       Role: !GetAtt CloudTrailSeederLambdaRole.Arn
-      Timeout: 300
+      Timeout: 900
       Code:
         ZipFile: |
           import json
@@ -599,23 +599,25 @@ Resources:
                       print(f"Assuming seeder role: {seeder_role_arn}")
 
                       # Assume the seeder role to get temporary credentials
-                      # Retry on AccessDenied due to IAM eventual consistency
+                      # Use constant interval polling for IAM eventual consistency
+                      # (not exponential backoff - we want to check as soon as it propagates)
                       sts = boto3.client('sts')
-                      max_retries = 10
-                      retry_delay = 2
+                      max_attempts = 60
+                      retry_interval = 5  # constant 5-second intervals
 
-                      for attempt in range(max_retries):
+                      for attempt in range(max_attempts):
                           try:
                               assumed = sts.assume_role(
                                   RoleArn=seeder_role_arn,
                                   RoleSessionName='cloudtrail-seeding-session'
                               )
+                              print(f"Successfully assumed role on attempt {attempt + 1}")
                               break
                           except ClientError as e:
-                              if e.response['Error']['Code'] == 'AccessDenied' and attempt < max_retries - 1:
-                                  print(f"AccessDenied on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
-                                  time.sleep(retry_delay)
-                                  retry_delay *= 2  # Exponential backoff
+                              if e.response['Error']['Code'] == 'AccessDenied' and attempt < max_attempts - 1:
+                                  if attempt == 0 or (attempt + 1) % 10 == 0:
+                                      print(f"Waiting for IAM propagation (attempt {attempt + 1}/{max_attempts})...")
+                                  time.sleep(retry_interval)
                               else:
                                   raise
 
