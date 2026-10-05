@@ -973,12 +973,6 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-InstanceArn'
 
-  PrimaryEniId:
-    Description: Primary network interface ID (eth0)
-    Value: !GetAtt SimulatedInstance.PrimaryNetworkInterfaceId
-    Export:
-      Name: !Sub '${AWS::StackName}-PrimaryEniId'
-
   SecondaryEniId:
     Description: Secondary network interface ID (eth1)
     Value: !Ref SecondaryNetworkInterface
