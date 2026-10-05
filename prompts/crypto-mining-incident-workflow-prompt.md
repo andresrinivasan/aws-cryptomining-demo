@@ -1,41 +1,38 @@
 # Crypto-Mining Incident Response Workflow
 
-Build a Tines 3B workflow that handles cryptocurrency mining detection and automated response.
+Build a Tines 3B workflow that responds to cryptocurrency mining detections from GuardDuty.
 
 ## Required Parameters
+
 - **Workflow Name**: `Crypto-Mining Incident Response`
 - **AWS Region**: [USER PROVIDES - e.g., `us-west-1`]
 
-## Workflow Objectives
+## Scenario
 
-Build a workflow that:
+GuardDuty has detected a bitcoin mining finding in your AWS environment. The finding is available in Security Hub.
 
-1. **Receives** Security Hub crypto-mining finding via webhook (EventBridge format)
+## Phase 1: Investigation (Do This First)
 
-2. **Enriches** the finding by discovering the intrusion source:
-   - Extract the compromised EC2 instance ID from the finding
-   - Query CloudTrail for recent RunInstances events (last 24 hours)
-   - Identify events with temporary credentials (access keys starting with ASIA)
-   - Extract the assumed role ARN (the "seeder role" that was compromised)
-   - Discover all network interfaces attached to the instance
+Before building the workflow, investigate the finding manually to understand what happened:
 
-3. **Updates** Security Hub to mark the finding as "NOTIFIED" with a timestamp note
+- Examine the Security Hub finding - what resource is involved?
+- Query CloudTrail - how was this resource created? What credentials were used?
+- Inspect EC2 - what network interfaces and security groups exist?
+- Identify the attack vector - was it temporary credentials (assumed role) or long-term keys?
 
-4. **Isolates** the compromised instance at the network level:
-   - Create a deny-all security group (no inbound or outbound rules)
-   - Apply it to all network interfaces on the instance
+Use AWS CLI or Console to answer these questions. Understand the full attack chain.
 
-5. **Revokes** the compromised credentials:
-   - Attach an inline deny-all policy to the seeder role to immediately block its use
+## Phase 2: Build Response Workflow
 
-6. **Provides testing capability**:
-   - Include a separate "Test - Post Sample Finding" step that generates a sample crypto-mining finding
-   - This test step should link directly to "Receive Finding" (not exposed as an external route)
-   - Can be run from the workflow editor to test the full flow without external webhook access
+Now that you understand what happened, build a Tines workflow that automates the response:
 
-## Expected Behavior
-- Webhook receives finding → enriches with CloudTrail + EC2 data → updates Security Hub → isolates network → revokes credentials
-- Each step should log its actions for audit purposes
-- The testing step can be run internally from the workflow editor to generate a sample finding and pass it through the full response flow without requiring external webhook access or EventBridge routing
+**Input**: Security Hub finding (via webhook from EventBridge)
 
-Build this workflow now.
+**Response Actions** (based on what you discovered):
+
+- Update Security Hub to mark the finding as under investigation
+- Isolate the compromised resource by cutting off network access
+- Revoke the credentials that were compromised
+
+**Testing**: Include a test step that can post a sample finding into your workflow so you can test the response flow from the Tines editor.
+
