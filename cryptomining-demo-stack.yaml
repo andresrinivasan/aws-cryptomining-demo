@@ -729,10 +729,8 @@ Resources:
             "id": "${SimulatedInstance}",
             "type": "t3.nano",
             "vpc_id": "${DemoVPC}",
-            "eni_ids": [
-              "${SimulatedInstance.PrimaryNetworkInterfaceId}",
-              "${SecondaryNetworkInterface}"
-            ]
+            "private_ip": "${SimulatedInstance.PrivateIp}",
+            "secondary_eni_id": "${SecondaryNetworkInterface}"
           },
           "seeder": {
             "principal_arn": "${SeederRole.Arn}",
