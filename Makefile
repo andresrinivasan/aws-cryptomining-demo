@@ -211,6 +211,20 @@ clean: ## Delete the CloudFormation stack
 				echo "$(BLUE)Waiting 30s for ENI detachment...$(NC)"; \
 				sleep 30; \
 			fi; \
+			GD_SECURITY_GROUPS=$$(aws $(PROFILE_ARG) ec2 describe-security-groups \
+				--region $(AWS_REGION) \
+				--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+				--query 'SecurityGroups[].GroupId' \
+				--output text 2>/dev/null); \
+			if [ -n "$$GD_SECURITY_GROUPS" ]; then \
+				echo "$(YELLOW)⚠ Found GuardDuty-managed security groups, deleting...$(NC)"; \
+				for SG in $$GD_SECURITY_GROUPS; do \
+					echo "  Deleting $$SG..."; \
+					aws $(PROFILE_ARG) ec2 delete-security-group \
+						--region $(AWS_REGION) \
+						--group-id $$SG 2>/dev/null || true; \
+				done; \
+			fi; \
 		fi; \
 		echo "$(BLUE)Deleting stack...$(NC)"; \
 		aws $(PROFILE_ARG) cloudformation delete-stack \
@@ -222,6 +236,94 @@ clean: ## Delete the CloudFormation stack
 			--stack-name $(STACK_NAME) 2>/dev/null && \
 		echo "$(GREEN)✓ Stack deleted successfully$(NC)" || \
 		echo "$(YELLOW)Stack deletion in progress (check status with: make status)$(NC)"; \
+	else \
+		echo "$(YELLOW)Cancelled$(NC)"; \
+	fi
+
+very-clean: ## Hunt down and delete all your cryptomining stacks in all regions
+	@echo "$(YELLOW)Warning: This will find and delete ALL your cryptomining-demo stacks in ALL regions.$(NC)"
+	@read -p "Are you sure? [y/N] " -n 1 -r; \
+	echo; \
+	if [ "$$REPLY" = "y" ] || [ "$$REPLY" = "Y" ]; then \
+		USERNAME=$$(whoami); \
+		echo "$(BLUE)Searching for stacks matching: cryptomining-demo-$$USERNAME*$(NC)"; \
+		echo "$(BLUE)Fetching all AWS regions...$(NC)"; \
+		REGIONS=$$(aws $(PROFILE_ARG) ec2 describe-regions --query 'Regions[].RegionName' --output text); \
+		for REGION in $$REGIONS; do \
+			echo ""; \
+			echo "$(BLUE)Checking $$REGION...$(NC)"; \
+			STACKS=$$(aws $(PROFILE_ARG) cloudformation list-stacks \
+				--region $$REGION \
+				--query 'StackSummaries[?starts_with(StackName, `cryptomining-demo-'$$USERNAME'`) && StackStatus!=`DELETE_COMPLETE`].StackName' \
+				--output text 2>/dev/null || true); \
+			if [ -n "$$STACKS" ]; then \
+				for STACK in $$STACKS; do \
+					echo "  $(YELLOW)Found: $$STACK$(NC)"; \
+					STACK_STATUS=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
+						--region $$REGION \
+						--stack-name $$STACK \
+						--query 'Stacks[0].StackStatus' \
+						--output text 2>/dev/null || echo "UNKNOWN"); \
+					echo "    Status: $$STACK_STATUS"; \
+					if [ "$$STACK_STATUS" = "DELETE_IN_PROGRESS" ] || [ "$$STACK_STATUS" = "ROLLBACK_IN_PROGRESS" ]; then \
+						echo "    $(BLUE)Already deleting, skipping...$(NC)"; \
+						continue; \
+					fi; \
+					if [ "$$STACK_STATUS" = "CREATE_IN_PROGRESS" ] || [ "$$STACK_STATUS" = "UPDATE_IN_PROGRESS" ]; then \
+						echo "    $(YELLOW)Stack is being modified, will attempt delete anyway...$(NC)"; \
+					fi; \
+					echo "    $(BLUE)Checking for GuardDuty VPC endpoints...$(NC)"; \
+					VPC_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stack-resources \
+						--region $$REGION \
+						--stack-name $$STACK \
+						--logical-resource-id DemoVPC \
+						--query 'StackResources[0].PhysicalResourceId' \
+						--output text 2>/dev/null || echo ""); \
+					if [ -n "$$VPC_ID" ] && [ "$$VPC_ID" != "None" ]; then \
+						GD_ENDPOINTS=$$(aws $(PROFILE_ARG) ec2 describe-vpc-endpoints \
+							--region $$REGION \
+							--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+							--query 'VpcEndpoints[].VpcEndpointId' \
+							--output text 2>/dev/null || echo ""); \
+						if [ -n "$$GD_ENDPOINTS" ]; then \
+							echo "    $(YELLOW)Deleting GuardDuty VPC endpoints...$(NC)"; \
+							for ENDPOINT in $$GD_ENDPOINTS; do \
+								aws $(PROFILE_ARG) ec2 delete-vpc-endpoints \
+									--region $$REGION \
+									--vpc-endpoint-ids $$ENDPOINT 2>/dev/null || true; \
+							done; \
+							sleep 10; \
+						fi; \
+						GD_SECURITY_GROUPS=$$(aws $(PROFILE_ARG) ec2 describe-security-groups \
+							--region $$REGION \
+							--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+							--query 'SecurityGroups[].GroupId' \
+							--output text 2>/dev/null || echo ""); \
+						if [ -n "$$GD_SECURITY_GROUPS" ]; then \
+							echo "    $(YELLOW)Deleting GuardDuty security groups...$(NC)"; \
+							for SG in $$GD_SECURITY_GROUPS; do \
+								aws $(PROFILE_ARG) ec2 delete-security-group \
+									--region $$REGION \
+									--group-id $$SG 2>/dev/null || true; \
+							done; \
+						fi; \
+					fi; \
+					echo "    $(BLUE)Deleting stack...$(NC)"; \
+					if aws $(PROFILE_ARG) cloudformation delete-stack \
+						--region $$REGION \
+						--stack-name $$STACK 2>/dev/null; then \
+						echo "    $(GREEN)✓ Deletion initiated$(NC)"; \
+					else \
+						echo "    $(RED)✗ Delete command failed$(NC)"; \
+					fi; \
+					echo ""; \
+				done; \
+			else \
+				echo "  No stacks found for user $$USERNAME"; \
+			fi; \
+		done; \
+		echo ""; \
+		echo "$(GREEN)✓ Cleanup complete. Stack deletions are happening asynchronously.$(NC)"; \
 	else \
 		echo "$(YELLOW)Cancelled$(NC)"; \
 	fi
