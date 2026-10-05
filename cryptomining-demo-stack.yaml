@@ -262,6 +262,9 @@ Resources:
               - Effect: Allow
                 Action: sts:AssumeRole
                 Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cryptomining-demo-${IdentityDetector.UserIdentifier}-SeederRole-*'
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: 'arn:aws:ssm:*:*:parameter/aws/service/ami-amazon-linux-latest/*'
 
   # ============================================================================
   # 3. SEEDER ROLE (Early creation for IAM propagation)
