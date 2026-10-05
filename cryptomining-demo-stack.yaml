@@ -556,9 +556,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action:
-                  - sts:AssumeRole
-                  - iam:GetRole
+                Action: sts:AssumeRole
                 Resource: !GetAtt SeederRole.Arn
 
   CloudTrailSeederLambda:
@@ -598,35 +596,31 @@ Resources:
                       subnet_id = event['ResourceProperties']['SubnetId']
                       security_group_id = event['ResourceProperties']['SecurityGroupId']
 
-                      # Wait for IAM role to propagate by polling GetRole
-                      # Once GetRole succeeds, the role is readable and assumable
-                      print(f"Waiting for IAM role propagation: {seeder_role_arn}")
+                      # Wait for IAM role and trust policy to propagate by polling AssumeRole
+                      # Role existence and trust policy propagate separately - must test actual AssumeRole
+                      print(f"Waiting for IAM role and trust policy propagation: {seeder_role_arn}")
 
-                      iam = boto3.client('iam')
-                      role_name = seeder_role_arn.split('/')[-1]
+                      sts = boto3.client('sts')
                       max_attempts = 60
                       poll_interval = 5
+                      assumed = None
 
                       for attempt in range(max_attempts):
                           try:
-                              iam.get_role(RoleName=role_name)
-                              print(f"IAM role propagated after {(attempt + 1) * poll_interval}s")
+                              assumed = sts.assume_role(
+                                  RoleArn=seeder_role_arn,
+                                  RoleSessionName='cloudtrail-seeding-session',
+                                  DurationSeconds=900  # minimum duration
+                              )
+                              print(f"Successfully assumed role after {(attempt + 1) * poll_interval}s")
                               break
                           except ClientError as e:
-                              if e.response['Error']['Code'] == 'NoSuchEntity' and attempt < max_attempts - 1:
+                              if e.response['Error']['Code'] == 'AccessDenied' and attempt < max_attempts - 1:
                                   if attempt == 0 or (attempt + 1) % 10 == 0:
-                                      print(f"IAM role not yet visible (attempt {attempt + 1}/{max_attempts})...")
+                                      print(f"Waiting for trust policy propagation (attempt {attempt + 1}/{max_attempts})...")
                                   time.sleep(poll_interval)
                               else:
                                   raise
-
-                      # Role has propagated, now assume it
-                      print(f"Assuming seeder role: {seeder_role_arn}")
-                      sts = boto3.client('sts')
-                      assumed = sts.assume_role(
-                          RoleArn=seeder_role_arn,
-                          RoleSessionName='cloudtrail-seeding-session'
-                      )
 
                       credentials = assumed['Credentials']
                       access_key_id = credentials['AccessKeyId']
