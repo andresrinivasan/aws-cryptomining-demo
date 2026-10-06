@@ -140,7 +140,7 @@ make deploy-verify       # Deploy and verify
 - Dedicated VPC with private subnets
 - Simulated EC2 instance with dual network interfaces
 - IAM seeder role with temporary credentials
-- Beacon Lambda (generates sample findings)
+- Beacon Lambda (imports synthetic findings with real instance metadata)
 - GuardDuty detector lookup
 - CloudTrail event seeding
 - SSM parameter with simulation manifest
@@ -270,7 +270,7 @@ aws securityhub get-findings \
   --region $AWS_REGION \
   --filters '{
     "ProductName":[{"Value":"GuardDuty","Comparison":"EQUALS"}],
-    "Type":[{"Value":"TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS","Comparison":"EQUALS"}],
+    "Type":[{"Value":"TTPs/Command and Control/CryptoMining","Comparison":"EQUALS"}],
     "ResourceId":[{"Value":"'$INSTANCE_ARN'","Comparison":"EQUALS"}]
   }' \
   --query 'Findings[0].{Id:Id,Status:Workflow.Status,Severity:Severity.Label}' \
@@ -279,7 +279,7 @@ aws securityhub get-findings \
 
 **Expected:** Finding with `Status=NEW`, `Severity=HIGH`
 
-**Note:** The finding type transforms from GuardDuty's `CryptoCurrency:EC2/BitcoinTool.B!DNS` to Security Hub's ASFF format: `TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS` (slash becomes dash).
+**Note:** The finding uses ASFF taxonomy types (`TTPs/Command and Control/CryptoMining` and `Effects/Resource Consumption/CryptoMining`) which classify the GuardDuty finding type `CryptoCurrency:EC2/BitcoinTool.B!DNS`.
 
 ### 3. Verify CloudTrail Seeding
 
@@ -549,10 +549,6 @@ The infrastructure is designed for shared AWS accounts where multiple Tines SEs 
 
 ## Technical Details
 
-### Finding Type Transformation
-
-GuardDuty finding type `CryptoCurrency:EC2/BitcoinTool.B!DNS` transforms to Security Hub ASFF type `TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS` (slash becomes dash).
-
 ### CloudTrail Event History
 
 **Important:** This solution does NOT require CloudTrail trails.
@@ -573,7 +569,7 @@ The Tines workflow queries Event History via the `cloudtrail:LookupEvents` API.
 | SecurityHubEnablerLambda | Python 3.13 | 120s | Enable Security Hub |
 | GuardDutyDetectorLookupLambda | Python 3.13 | 60s | Lookup GuardDuty detector |
 | CloudTrailSeederLambda | Python 3.13 | 300s | Seed CloudTrail with temp creds |
-| BeaconLambda | Python 3.13 | 60s | Generate sample findings |
+| BeaconLambda | Python 3.13 | 60s | Import synthetic findings via BatchImportFindings |
 
 ## License
 

@@ -41,5 +41,5 @@ Create the top level README file to document the workflow and its usage first. A
 
 Derive every target (the resource to isolate, the credentials to neutralize) from the incoming finding and live AWS queries at runtime - do not hardcode values from this specific incident. The workflow is built against the current finding but must handle similar future incidents automatically.
 
-**Testing**: Include a test step that can post a sample finding into your workflow so you can test the response flow from Tines 3B.
+**Testing**: Include a test step that can post a test finding into your workflow so you can test the response flow from Tines 3B without waiting for the beacon.
 

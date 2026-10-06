@@ -403,7 +403,7 @@ aws logs tail /aws/lambda/cryptomining-demo-${USER}-beacon \
   --follow \
   --since 5m
 ```
-**Expected**: Log entries showing "Creating sample finding" or "Finding already NOTIFIED, skipping"
+**Expected**: Log entries showing "Importing synthetic finding via BatchImportFindings" or "Finding already NOTIFIED, beacon paused"
 
 ### 2. Verify Security Hub Finding Exists
 ```bash

@@ -28,7 +28,7 @@ Configure EventBridge to send Security Hub findings to the Tines webhook:
      "detail": {
        "findings": {
          "ProductName": ["GuardDuty"],
-         "Types": ["TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS"],
+         "Types": ["TTPs/Command and Control/CryptoMining"],
          "Workflow": {
            "Status": ["NEW"]
          }
