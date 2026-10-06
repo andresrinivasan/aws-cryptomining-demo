@@ -863,7 +863,6 @@ Resources:
                                   "Type": INSTANCE_TYPE,
                                   "ImageId": IMAGE_ID,
                                   "IpV4Addresses": [INSTANCE_PRIVATE_IP],
-                                  "IpV6Addresses": [],
                                   "VpcId": VPC_ID,
                                   "SubnetId": SUBNET_ID,
                                   "IamInstanceProfileArn": IAM_INSTANCE_PROFILE_ARN,
