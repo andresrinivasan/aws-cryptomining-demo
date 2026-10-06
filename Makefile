@@ -1,4 +1,4 @@
-.PHONY: help deploy verify enable-beacon disable-beacon logs outputs clean status
+.PHONY: help deploy verify enable-beacon disable-beacon reset reset-dry-run logs outputs clean status
 
 # Default values (can be overridden via environment variables)
 AWS_REGION ?= us-west-1
@@ -29,6 +29,7 @@ help: ## Show this help message
 	@echo "  make deploy AWS_PROFILE=sandbox     # Deploy with specific profile"
 	@echo "  make deploy AWS_REGION=us-east-1"
 	@echo "  make enable-beacon"
+	@echo "  make reset                          # Re-run the demo without redeploy"
 	@echo "  make logs"
 	@echo ""
 
@@ -76,6 +77,12 @@ disable-beacon: ## Disable the beacon schedule
 		--output text); \
 	aws $(PROFILE_ARG) events disable-rule --region $(AWS_REGION) --name $$BEACON_RULE && \
 	echo "$(GREEN)✓ Beacon disabled$(NC)"
+
+reset: ## Revert workflow remediation so the demo can run again (no redeploy)
+	@./reset.sh --region $(AWS_REGION) --stack-name $(STACK_NAME) $(if $(AWS_PROFILE),--profile $(AWS_PROFILE),)
+
+reset-dry-run: ## Preview what reset would change without mutating anything
+	@./reset.sh --region $(AWS_REGION) --stack-name $(STACK_NAME) $(if $(AWS_PROFILE),--profile $(AWS_PROFILE),) --dry-run
 
 logs: ## Tail beacon Lambda logs
 	@echo "$(BLUE)Tailing beacon logs (Ctrl+C to exit)...$(NC)"

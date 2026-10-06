@@ -90,6 +90,8 @@ make deploy          # Deploy the infrastructure
 make verify          # Run verification checks
 make enable-beacon   # Enable beacon schedule
 make disable-beacon  # Disable beacon schedule
+make reset           # Revert workflow remediation to re-run the demo (no redeploy)
+make reset-dry-run   # Preview what reset would change
 make logs            # Tail beacon Lambda logs
 make outputs         # Show stack outputs
 make status          # Show stack status
@@ -225,6 +227,56 @@ Use [prompts/eventbridge-routing-prompt.md](prompts/eventbridge-routing-prompt.m
    - Applies deny-all security group to instance
    - Attaches inline deny policy to seeder role
 6. **Beacon detects NOTIFIED status** → stops generating new findings
+
+## Re-running the Demo (Reset)
+
+Once the Tines workflow runs, it mutates live AWS state: it marks the Security
+Hub finding as handled, swaps the instance onto an isolation security group,
+and neutralizes the seeder-role credentials. Those changes persist and block a
+clean second run. Instead of tearing the stack down and redeploying, reset the
+live state back to its post-deploy resting point:
+
+```bash
+make reset
+```
+
+Preview the changes first without mutating anything:
+
+```bash
+make reset-dry-run
+```
+
+**What reset does** (all targets discovered at runtime from the stack outputs
+and live AWS queries — nothing from a specific incident is hardcoded):
+
+1. **Security Hub finding** → resets `Workflow.Status` back to `NEW`, which
+   re-arms the beacon (it pauses itself when the finding is `NOTIFIED`).
+2. **Network isolation** → rebinds every instance ENI (primary and secondary)
+   back to the stack's original instance security group. Any security group it
+   finds attached that isn't the original is treated as the isolation group.
+3. **Credential neutralization** → restores the seeder role to its deployed
+   baseline (one inline `CloudTrailSeeding` policy, no attached managed
+   policies). It detects and reverses whichever mechanism the workflow used:
+   an extra inline deny policy, an in-place deny overwrite of the baseline
+   policy, or an attached managed policy.
+4. **Isolation SG cleanup** → best-effort deletes the orphaned isolation
+   security group(s) the workflow created (skip with `--keep-isolation-sg`).
+
+The reset is **implementation-agnostic**: it discovers the isolation security
+group and the credential-neutralization mechanism live, so it keeps working
+even if the workflow is rebuilt with a different approach.
+
+After reset, the workflow sees a fresh `NEW` finding on the next beacon tick
+and remediates again. If the beacon was disabled, run `make enable-beacon`.
+
+**Direct script usage:**
+
+```bash
+./reset.sh --help
+./reset.sh --region us-east-1 --stack-name my-demo
+./reset.sh --dry-run
+./reset.sh --keep-isolation-sg
+```
 
 ## Verification
 
