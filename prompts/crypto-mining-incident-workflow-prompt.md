@@ -24,7 +24,7 @@ Use AWS CLI or Console to answer these questions. Understand the full attack cha
 
 ## Phase 2: Build Response Workflow
 
-Now that you understand what happened, build a Tines workflow that automates the response:
+Now that you understand what happened, build a Tines workflow that automates the response. Create the top level README file to document the workflow and its usage first. As you create the steps, create the step README. You may need to go back and update the top level README. 
 
 **Input**: Security Hub finding (via webhook from EventBridge)
 
@@ -33,6 +33,7 @@ Now that you understand what happened, build a Tines workflow that automates the
 - Update Security Hub to mark the finding as under investigation
 - Isolate the compromised resource by cutting off network access
 - Revoke the credentials that were compromised
+- The workflow, while based on the current finding must be designed to handle similar future incidents automatically
 
 **Testing**: Include a test step that can post a sample finding into your workflow so you can test the response flow from the Tines editor.
 
