@@ -463,9 +463,16 @@ aws cloudformation delete-stack --region $AWS_REGION --stack-name $STACK_NAME
 
 ### Issue: Stack deletion fails on VPC (ENI still attached)
 
-**Cause:** ENI from EC2 instance still attached
+**Cause:** ENI from EC2 instance still attached, often because the Tines
+workflow moved the instance onto an isolation security group that
+CloudFormation doesn't manage.
 
-**Fix:** Manually detach secondary ENI:
+**Fix (preferred):** `make clean` now rebinds the instance interfaces back to
+the stack security group automatically before deleting. If you ran `clean`
+before this hardening existed, run `make reset` first to restore the original
+security group, then `make clean` again.
+
+**Fix (manual):** Detach the secondary ENI directly:
 ```bash
 # Get secondary ENI ID
 SECONDARY_ENI=$(aws cloudformation describe-stacks \
@@ -508,9 +515,14 @@ make clean
 
 This will:
 - Disable the beacon
+- Rebind any workflow-isolated instance interfaces back to the stack security
+  group (so an orphaned isolation SG can't block deletion)
 - Delete the CloudFormation stack
 - Wait for deletion to complete
 - Confirm before proceeding
+
+> If you only want to re-run the demo rather than tear it down, use
+> `make reset` instead (see [Re-running the Demo](#re-running-the-demo-reset)).
 
 **What gets deleted:**
 - VPC, subnets, route tables, internet gateway

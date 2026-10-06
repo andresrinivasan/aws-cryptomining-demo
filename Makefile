@@ -202,6 +202,43 @@ clean: ## Delete the CloudFormation stack
 			--query 'StackResources[0].PhysicalResourceId' \
 			--output text 2>/dev/null); \
 		if [ -n "$$VPC_ID" ] && [ "$$VPC_ID" != "None" ]; then \
+			echo "$(BLUE)Rebinding instance interfaces to the stack security group...$(NC)"; \
+			INSTANCE_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
+				--region $(AWS_REGION) \
+				--stack-name $(STACK_NAME) \
+				--query 'Stacks[0].Outputs[?OutputKey==`SimulatedInstanceId`].OutputValue' \
+				--output text 2>/dev/null); \
+			USER_ID=$$(aws $(PROFILE_ARG) cloudformation describe-stacks \
+				--region $(AWS_REGION) \
+				--stack-name $(STACK_NAME) \
+				--query 'Stacks[0].Outputs[?OutputKey==`UserIdentifier`].OutputValue' \
+				--output text 2>/dev/null); \
+			ORIGINAL_SG=$$(aws $(PROFILE_ARG) ec2 describe-security-groups \
+				--region $(AWS_REGION) \
+				--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:Name,Values=cryptomining-demo-$$USER_ID-instance-sg" \
+				--query 'SecurityGroups[0].GroupId' \
+				--output text 2>/dev/null); \
+			if [ -n "$$INSTANCE_ID" ] && [ "$$INSTANCE_ID" != "None" ] && [ -n "$$ORIGINAL_SG" ] && [ "$$ORIGINAL_SG" != "None" ]; then \
+				ENIS=$$(aws $(PROFILE_ARG) ec2 describe-instances \
+					--region $(AWS_REGION) \
+					--instance-ids $$INSTANCE_ID \
+					--query 'Reservations[].Instances[].NetworkInterfaces[].NetworkInterfaceId' \
+					--output text 2>/dev/null); \
+				for ENI in $$ENIS; do \
+					CURRENT=$$(aws $(PROFILE_ARG) ec2 describe-network-interfaces \
+						--region $(AWS_REGION) \
+						--network-interface-ids $$ENI \
+						--query 'NetworkInterfaces[0].Groups[].GroupId' \
+						--output text 2>/dev/null); \
+					if [ "$$CURRENT" != "$$ORIGINAL_SG" ]; then \
+						echo "  Rebinding $$ENI -> $$ORIGINAL_SG (was: $$CURRENT)"; \
+						aws $(PROFILE_ARG) ec2 modify-network-interface-attribute \
+							--region $(AWS_REGION) \
+							--network-interface-id $$ENI \
+							--groups $$ORIGINAL_SG 2>/dev/null || true; \
+					fi; \
+				done; \
+			fi; \
 			GD_ENDPOINTS=$$(aws $(PROFILE_ARG) ec2 describe-vpc-endpoints \
 				--region $(AWS_REGION) \
 				--filters "Name=vpc-id,Values=$$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
