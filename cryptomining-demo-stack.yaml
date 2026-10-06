@@ -766,7 +766,8 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - guardduty:CreateSampleFindings
+                  - securityhub:BatchImportFindings
+                  - securityhub:BatchUpdateFindings
                   - securityhub:GetFindings
                 Resource: '*'
 
@@ -786,8 +787,16 @@ Resources:
         Variables:
           DETECTOR_ID: !GetAtt GuardDutyDetectorLookup.DetectorId
           PRODUCT_ARN: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:product/${AWS::AccountId}/default'
+          INSTANCE_ID: !Ref SimulatedInstance
           INSTANCE_ARN: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${SimulatedInstance}'
+          INSTANCE_TYPE: 't3.nano'
+          INSTANCE_PRIVATE_IP: !GetAtt SimulatedInstance.PrivateIp
+          VPC_ID: !Ref DemoVPC
+          SUBNET_ID: !Ref PrivateSubnet
+          IMAGE_ID: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+          IAM_INSTANCE_PROFILE_ARN: !GetAtt SimulatedInstanceProfile.Arn
           REGION: !Ref AWS::Region
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
           USER_IDENTIFIER: !GetAtt IdentityDetector.UserIdentifier
       Code:
         ZipFile: |
@@ -796,13 +805,95 @@ Resources:
           import os
           from datetime import datetime
 
-          guardduty = boto3.client('guardduty')
           securityhub = boto3.client('securityhub')
 
+          # Environment variables
           DETECTOR_ID = os.environ['DETECTOR_ID']
+          PRODUCT_ARN = os.environ['PRODUCT_ARN']
+          INSTANCE_ID = os.environ['INSTANCE_ID']
           INSTANCE_ARN = os.environ['INSTANCE_ARN']
+          INSTANCE_TYPE = os.environ['INSTANCE_TYPE']
+          INSTANCE_PRIVATE_IP = os.environ['INSTANCE_PRIVATE_IP']
+          VPC_ID = os.environ['VPC_ID']
+          SUBNET_ID = os.environ['SUBNET_ID']
+          IMAGE_ID = os.environ['IMAGE_ID']
+          IAM_INSTANCE_PROFILE_ARN = os.environ['IAM_INSTANCE_PROFILE_ARN']
           REGION = os.environ['REGION']
+          AWS_ACCOUNT_ID = os.environ['AWS_ACCOUNT_ID']
           USER_IDENTIFIER = os.environ['USER_IDENTIFIER']
+
+          def construct_finding_template():
+              """Construct ASFF finding for CryptoCurrency:EC2/BitcoinTool.B!DNS."""
+              now = datetime.utcnow().isoformat() + 'Z'
+
+              # Stable ID across re-fires (same finding, not a new one each time)
+              finding_id = f"arn:aws:securityhub:{REGION}:{AWS_ACCOUNT_ID}:subscription/guardduty/demo/crypto-mining-{USER_IDENTIFIER}"
+
+              return {
+                  "SchemaVersion": "2018-10-08",
+                  "Id": finding_id,
+                  "ProductArn": PRODUCT_ARN,
+                  "ProductName": "GuardDuty",
+                  "CompanyName": "Amazon",
+                  "GeneratorId": f"arn:aws:guardduty:{REGION}:{AWS_ACCOUNT_ID}:detector/{DETECTOR_ID}/finding-type/CryptoCurrency:EC2/BitcoinTool.B!DNS",
+                  "AwsAccountId": AWS_ACCOUNT_ID,
+                  "Types": [
+                      "TTPs/Command and Control/CryptoMining",
+                      "Effects/Resource Consumption/CryptoMining"
+                  ],
+                  "CreatedAt": now,
+                  "UpdatedAt": now,
+                  "FirstObservedAt": now,
+                  "LastObservedAt": now,
+                  "Severity": {
+                      "Label": "HIGH",
+                      "Normalized": 50,
+                      "Product": 8
+                  },
+                  "Title": "Bitcoin-related domain name queried by EC2 instance",
+                  "Description": "EC2 instance is querying a domain name associated with Bitcoin activity.",
+                  "Resources": [
+                      {
+                          "Type": "AwsEc2Instance",
+                          "Id": INSTANCE_ARN,
+                          "Partition": "aws",
+                          "Region": REGION,
+                          "Details": {
+                              "AwsEc2Instance": {
+                                  "Type": INSTANCE_TYPE,
+                                  "ImageId": IMAGE_ID,
+                                  "IpV4Addresses": [INSTANCE_PRIVATE_IP],
+                                  "IpV6Addresses": [],
+                                  "VpcId": VPC_ID,
+                                  "SubnetId": SUBNET_ID,
+                                  "IamInstanceProfileArn": IAM_INSTANCE_PROFILE_ARN,
+                                  "LaunchedAt": now
+                              }
+                          }
+                      }
+                  ],
+                  "Action": {
+                      "ActionType": "DNS_REQUEST",
+                      "DnsRequestAction": {
+                          "Domain": "pool-eu1.xmr-mining.invalid",
+                          "Protocol": "UDP",
+                          "Blocked": False
+                      }
+                  },
+                  "RecordState": "ACTIVE",
+                  "Region": REGION,
+                  "ProductFields": {
+                      "aws/guardduty/service/action/actionType": "DNS_REQUEST",
+                      "aws/guardduty/service/action/dnsRequestAction/domain": "pool-eu1.xmr-mining.invalid",
+                      "aws/guardduty/service/action/dnsRequestAction/protocol": "UDP",
+                      "aws/guardduty/service/action/dnsRequestAction/blocked": "false",
+                      "aws/guardduty/service/resourceRole": "TARGET",
+                      "aws/guardduty/service/detectorId": DETECTOR_ID,
+                      "aws/guardduty/service/serviceName": "guardduty",
+                      "aws/guardduty/service/additionalInfo": json.dumps({"threatListName": "BitcoinIP"}),
+                      "aws/guardduty/service/archived": "false"
+                  }
+              }
 
           def handler(event, context):
               print(f"Beacon invoked at {datetime.utcnow().isoformat()}Z")
@@ -815,7 +906,7 @@ Resources:
                   findings_response = securityhub.get_findings(
                       Filters={
                           'ProductName': [{'Value': 'GuardDuty', 'Comparison': 'EQUALS'}],
-                          'Type': [{'Value': 'TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B!DNS', 'Comparison': 'EQUALS'}],
+                          'Type': [{'Value': 'TTPs/Command and Control/CryptoMining', 'Comparison': 'EQUALS'}],
                           'ResourceId': [{'Value': INSTANCE_ARN, 'Comparison': 'EQUALS'}]
                       },
                       MaxResults=1
@@ -829,7 +920,7 @@ Resources:
                       print(f"Workflow status: {workflow_status}")
 
                       if workflow_status == 'NOTIFIED':
-                          print("Finding is already NOTIFIED, skipping sample generation")
+                          print("Finding is already NOTIFIED, beacon paused")
                           return {
                               'statusCode': 200,
                               'body': json.dumps({
@@ -838,20 +929,23 @@ Resources:
                               })
                           }
 
-                  # Create sample finding
-                  print("Creating sample GuardDuty finding...")
-                  guardduty.create_sample_findings(
-                      DetectorId=DETECTOR_ID,
-                      FindingTypes=['CryptoCurrency:EC2/BitcoinTool.B!DNS']
-                  )
+                  # Import finding via BatchImportFindings
+                  print("Importing synthetic finding via BatchImportFindings...")
+                  finding = construct_finding_template()
 
-                  print("Sample finding created successfully")
+                  response = securityhub.batch_import_findings(Findings=[finding])
+
+                  if response['FailedCount'] > 0:
+                      print(f"Failed to import finding: {response['FailedFindings']}")
+                      raise RuntimeError(f"Import failed: {response['FailedFindings']}")
+
+                  print(f"Finding imported successfully. Success count: {response['SuccessCount']}")
 
                   return {
                       'statusCode': 200,
                       'body': json.dumps({
-                          'message': 'Sample finding created',
-                          'detector_id': DETECTOR_ID,
+                          'message': 'Finding imported via BatchImportFindings',
+                          'finding_id': finding['Id'],
                           'instance_arn': INSTANCE_ARN,
                           'timestamp': datetime.utcnow().isoformat() + 'Z'
                       })

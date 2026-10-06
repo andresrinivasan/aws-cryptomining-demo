@@ -151,10 +151,12 @@ Create a new VPC with:
 - **Rationale**: Prevents beacon from firing immediately on every deploy; user must explicitly enable
 
 **Purpose**: 
-- Calls `guardduty:CreateSampleFindings` with type `CryptoCurrency:EC2/BitcoinTool.B!DNS`
-- References the simulated EC2 instance ARN (from stack resources)
+- Calls `securityhub:BatchImportFindings` to create synthetic GuardDuty findings with type `CryptoCurrency:EC2/BitcoinTool.B!DNS`
+- Uses real EC2 instance metadata (not fabricated IDs like CreateSampleFindings)
+- Constructs full ASFF (AWS Security Finding Format) finding in code
 - Checks if finding still at `Workflow.Status=NEW` via `securityhub:GetFindings`
 - If finding status is `NOTIFIED`, Lambda exits early (stops generating new samples)
+- Finding appears identical to real GuardDuty findings (no `Sample: true` flag)
 
 **IAM Permissions** (Lambda execution role):
 ```json
@@ -164,7 +166,8 @@ Create a new VPC with:
     {
       "Effect": "Allow",
       "Action": [
-        "guardduty:CreateSampleFindings",
+        "securityhub:BatchImportFindings",
+        "securityhub:BatchUpdateFindings",
         "securityhub:GetFindings",
         "logs:CreateLogGroup",
         "logs:CreateLogStream",
@@ -179,8 +182,16 @@ Create a new VPC with:
 **Environment Variables**:
 - `DETECTOR_ID`: Discovered via custom resource (see #7 below)
 - `PRODUCT_ARN`: `arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:product/${AWS::AccountId}/default`
+- `INSTANCE_ID`: `!Ref SimulatedInstance`
 - `INSTANCE_ARN`: `!Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${SimulatedInstance}'`
+- `INSTANCE_TYPE`: `'t3.nano'`
+- `INSTANCE_PRIVATE_IP`: `!GetAtt SimulatedInstance.PrivateIp`
+- `VPC_ID`: `!Ref DemoVPC`
+- `SUBNET_ID`: `!Ref PrivateSubnet`
+- `IMAGE_ID`: `!Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'`
+- `IAM_INSTANCE_PROFILE_ARN`: `!GetAtt SimulatedInstanceProfile.Arn`
 - `REGION`: `!Ref AWS::Region`
+- `AWS_ACCOUNT_ID`: `!Ref AWS::AccountId`
 - `USER_IDENTIFIER`: `!GetAtt IdentityDetector.UserIdentifier` (for filtering findings by user in shared account)
 
 **CloudWatch Alarm**: Create alarm if beacon Lambda errors exceed 2 in 5 minutes (indicates beacon malfunction).

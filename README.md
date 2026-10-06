@@ -25,7 +25,7 @@ GuardDuty Finding → Security Hub → EventBridge → Tines Webhook
 
 ### Key Components
 
-- **Beacon Lambda**: Generates sample GuardDuty findings every 3 minutes
+- **Beacon Lambda**: Imports synthetic GuardDuty findings every 3 minutes using real instance metadata
 - **Simulated EC2 Instance**: Target of the "attack" (no actual malicious activity)
 - **Seeder IAM Role**: Compromised role used to launch the instance
 - **Tines Workflow**: Automated response orchestration
@@ -175,8 +175,9 @@ make enable-beacon
 
 **What happens:**
 - Beacon Lambda runs every 3 minutes
-- Creates GuardDuty sample finding: `CryptoCurrency:EC2/BitcoinTool.B!DNS`
-- Finding appears in Security Hub
+- Imports synthetic GuardDuty finding via `BatchImportFindings`: `CryptoCurrency:EC2/BitcoinTool.B!DNS`
+- Finding uses real EC2 instance metadata (not fabricated IDs)
+- Finding appears in Security Hub identical to real GuardDuty findings
 - Beacon checks Security Hub status before each invocation
 - If finding status is `NOTIFIED`, beacon pauses (workflow already handled it)
 
@@ -213,8 +214,8 @@ Use [prompts/eventbridge-routing-prompt.md](prompts/eventbridge-routing-prompt.m
 
 ## Demo Flow
 
-1. **Beacon fires** (every 3 minutes) → generates GuardDuty sample finding
-2. **GuardDuty** publishes to Security Hub
+1. **Beacon fires** (every 3 minutes) → imports synthetic finding via BatchImportFindings
+2. **Security Hub** receives finding with real instance metadata (no `Sample: true` flag)
 3. **Security Hub** emits finding as EventBridge event
 4. **EventBridge** routes to Tines via API Destination
 5. **Tines workflow** executes:
@@ -250,8 +251,8 @@ make logs
 2026-10-03T12:34:56Z START RequestId: abc-123-def-456
 2026-10-03T12:34:56Z Beacon invoked at 2026-10-03T12:34:56Z
 2026-10-03T12:34:56Z Detector ID: 12abc34d56e78f90...
-2026-10-03T12:34:57Z Creating sample GuardDuty finding...
-2026-10-03T12:34:57Z Sample finding created successfully
+2026-10-03T12:34:57Z Importing synthetic finding via BatchImportFindings...
+2026-10-03T12:34:57Z Finding imported successfully. Success count: 1
 ```
 
 ### 2. Verify Security Hub Finding
