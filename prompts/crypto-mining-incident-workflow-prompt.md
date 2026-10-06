@@ -33,7 +33,7 @@ Create the top level README file to document the workflow and its usage first. A
 
 **Input**: Security Hub finding (via webhook from EventBridge)
 
-**Response Actions** (based on what is discovered from the first steps int the workflow):
+**Response Actions** (based on what is discovered from the first steps in the workflow):
 
 - Update Security Hub to mark the finding as under investigation
 - Isolate the compromised resource by swapping its network access to a dedicated isolation security group (the resting state may already restrict traffic, so isolation must be an observable change in posture)
@@ -41,5 +41,5 @@ Create the top level README file to document the workflow and its usage first. A
 
 Derive every target (the resource to isolate, the credentials to neutralize) from the incoming finding and live AWS queries at runtime - do not hardcode values from this specific incident. The workflow is built against the current finding but must handle similar future incidents automatically.
 
-**Testing**: Include a test step that can post a test finding into your workflow so you can test the response flow from Tines 3B without waiting for the beacon.
+**Testing**: Include a test step that can post a sample finding into your workflow so you can test the response flow from Tines 3B.
 
